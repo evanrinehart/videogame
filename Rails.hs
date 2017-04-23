@@ -1,6 +1,5 @@
 module Rails where
 
-import Common
 import Types
 
 type Speed = Rational

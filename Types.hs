@@ -3,8 +3,6 @@ module Types where
 import SDL
 import Data.HashMap.Strict (HashMap)
 
-import Common
-
 type Delta = Integer
 type ObjectId = Int
 
