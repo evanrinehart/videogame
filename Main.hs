@@ -14,6 +14,7 @@ import Watchdog
 import LongSleep
 import Delta
 import Game
+import Audio
 
 main :: IO ()
 main = do
@@ -75,6 +76,16 @@ setup sampleRate = do
     window
     (-1)
     (defaultRenderer {rendererType=AcceleratedVSyncRenderer})
+  (device, _) <- openAudioDevice (OpenDeviceSpec
+    { openDeviceFreq = Mandate (fromInteger sampleRate)
+    , openDeviceFormat = Mandate Signed16BitLEAudio
+    , openDeviceChannels = Mandate Mono
+    , openDeviceSamples = 2048
+    , openDeviceCallback = audioCallback 
+    , openDeviceUsage = ForPlayback
+    , openDeviceName = Nothing
+    })
+  setAudioDevicePlaybackState device Play
   let g = initialGameState
   gmv <- newMVar g
   dogmv <- forkIO hang >>= newMVar
@@ -82,3 +93,4 @@ setup sampleRate = do
   kickWatchdog next gmv dogmv
   since <- newDeltaGenerator sampleRate
   return (renderer, gmv, dogmv, since)
+
