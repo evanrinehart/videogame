@@ -6,31 +6,37 @@ import Control.Exception
 import Types
 import LongSleep
 import Engine
-import Game
+import GameState
 
-kickWatchdog :: Prediction -> MVar Game -> MVar ThreadId -> IO ()
-kickWatchdog next gmv dogmv = go where
-  go = do
+type Watchdog = Prediction -> IO ()
+
+newWatchdog :: MVar Game -> IO Watchdog
+newWatchdog gmv = do
+  dogmv <- forkIO hang >>= newMVar
+  return $ \next -> do
     mth <- tryTakeMVar dogmv
     case mth of
-      Nothing -> throwIO (userError "kickWatchdog: watchdog thread not found")
+      Nothing -> throwIO (userError "kickDog: watchdog thread not found")
       Just th -> killThread th
-    th <- forkIO (loop next)
+    th <- forkIO (watchdogThread gmv next)
     putMVar dogmv th
+    
+watchdogThread :: MVar Game -> Prediction -> IO a
+watchdogThread gmv next = loop next where
   loop Never = hang
   loop (NotBefore dt) = do
     longSleep dt
     next <- modifyMVar gmv $ \g -> do
-      let g' = passTime dt g
-      let next = detectNext g'
+      let g' = elapse dt g
+      let next = detect g'
       return (g', next)
     loop next
   loop (InExactly dt occ) = do
     longSleep dt
     next <- modifyMVar gmv $ \g -> do
-      let g' = passTime dt g
+      let g' = elapse dt g
       let (g'', output) = poke occ g'
-      let next = detectNext g'
-      output
+      let next = detect g'
+      --output
       return (g', next)
     loop next

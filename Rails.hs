@@ -2,21 +2,11 @@ module Rails where
 
 import Types
 
-type Speed = Rational
-newtype SampleRate = SampleRate Integer
-
 sr = 44100
 
 speed2counterMax :: Speed -> Integer
 speed2counterMax 0 = 0
 speed2counterMax s = max 1 (floor ((fromInteger sr) / s))
-
-data Rail = Rail
-  { railValue :: !Integer
-  , railSize :: !Integer
-  , railCounter :: !Integer
-  , railSpeed :: Integer -> Speed
-  }
 
 instance Show Rail where
   show (Rail v m c s) = "Rail " ++ show v ++ "/" ++ show m ++ " " ++ show c ++ " (" ++ show (s v) ++ ")"
@@ -30,6 +20,15 @@ advanceRail dt r@(Rail v m c s)
   | dt < c = Rail v m (c - dt) s
   | otherwise = advanceRail (dt - c) (Rail (v+1) m c' s) where
       c' = speed2counterMax (s (v+1))
+
+advanceRing :: Delta -> Rail -> Rail
+advanceRing dt r@(Rail v m c s)
+  | dt < 0 = error "advanceRing negative"
+  | c == 0 = r
+  | dt == 0 = r
+  | dt < c = Rail v m (c - dt) s
+  | otherwise = advanceRail (dt - c) (Rail ((v+1) `mod` m) m c' s) where
+      c' = speed2counterMax (s ((v+1) `mod` m))
 
 simpleRail :: Integer -> Speed -> Rail
 simpleRail size speed = Rail 0 size c0 s where
