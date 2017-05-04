@@ -39,10 +39,13 @@ gfxText str = go 0 str where
     Shift (V2 x 0) (Sprite (V4 sx sy w 7)) <> go (x + w + 1) cs
 
 -- colors
+black,offWhite,gray,darkGray,
+  darkness,darkBlue,water,skyBlue,
+  peach,pink,blood,brown,
+  orange,gold,grass,cucumber :: Color
 black    = V3 0 0 0
 offWhite = V3 243 241 244
 gray     = V3 151 146 169
-darkGray :: Color
 darkGray = V3 80 80 98
 darkness = V3 34 36 40
 darkBlue = V3 41 88 166
@@ -56,3 +59,4 @@ orange   = V3 208 123 58
 gold     = V3 240 197 122
 grass    = V3 131 156 49
 cucumber = V3 43 96 66
+

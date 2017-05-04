@@ -3,10 +3,14 @@ module Types where
 import SDL
 import Data.HashMap.Strict (HashMap)
 import Data.Word
+import Control.Concurrent
+import Control.Exception
 
 type Delta = Integer
 type SampleRate = Integer
 type ObjectId = Int
+
+type ErrorMV = MVar (String, SomeException)
 
 data RawInput =
   RawJoy !PlayerNo !CardinalDir !InputMotion |
@@ -15,19 +19,30 @@ data RawInput =
   RawInsertCoin
     deriving (Show,Eq)
 
-data Prediction =
-  Never | NotBefore !Delta | InExactly !Delta !Occur
-    deriving (Show, Eq)
+data Prediction a =
+  Never | NotBefore Delta | InExactly Delta a
+    deriving (Show)
+
+instance Eq (Prediction a) where
+  Never == Never = True
+  NotBefore x == NotBefore y = x == y
+  InExactly x _ == InExactly y _ = x == y
+  _ == _ = False
+
+instance Ord (Prediction a) where
+  compare Never Never = EQ
+  compare Never _ = GT
+  compare (NotBefore x) (NotBefore y) = compare x y
+  compare (NotBefore x) (InExactly y _) = compare x y
+  compare (InExactly x _) (InExactly y _) = compare x y
+  compare arg1 arg2 = compare EQ (compare arg2 arg1)
 
 data CardinalDir = North | South | East | West deriving (Show, Eq)
 data PlayerNo = Player1 | Player2 deriving (Show, Eq)
 
 type Color = V3 Word8
 
-data Occur =
-  OccRawIn !RawInput |
-  OccEndOf !ObjectId |
-  OccCollision !ObjectId !ObjectId
+data Input = Inp !RawInput
     deriving (Show, Eq)
 
 data Rail = Rail
@@ -52,45 +67,4 @@ data Output =
   PlaySound Int
     deriving Show
 
-{-
-data Platform = Platform
-  { platX :: (Integer, Integer)
-  , platY :: Integer
-  , platMaterial :: Integer -> Material
-  }
-
-data PlayerChar = PlayerChar
-  { plLocX :: ObjectId
-  , plLocY :: ObjectId
-  , plSpr :: (ObjectId, Integer -> Picture)
-  }
-
-data BigLetter = BigLetter
-  { blLetter :: Char
-  , blColor :: (ObjectId, Integer -> Color)
-  , blTransform :: ObjectId
-  }
-
--- types that need fleshing out
-data Game = Game
-  { gSpace       :: !()
-  , gRails       :: !(HashMap ObjectId Rail)
-  , gPlatforms   :: !(HashMap ObjectId Platform)
-  , gPlayers     :: !(HashMap ObjectId PlayerChar)
-  , gObjectIdMax :: !Integer
-  , gCredits     :: !Integer
-  , gScore1      :: !Integer
-  , gScore2      :: !Integer
-  , gHighScores  :: ![([Char], Integer)]
-  , gScripts     :: !(HashMap ScriptId Awaiting)
-  , gChildren    :: !(HashMap ScriptId [ScriptId])
-  , gClaims      :: !(HashMap ScriptId [ObjectId])
-  }
-
-data Viz a where
-  VizRail :: ObjectId -> Viz Rail
-  VizPlat :: ObjectId -> Viz Platform
-  VizApp :: Viz (a -> b) -> Viz a -> Viz b
-  VizPure :: a -> Viz a
-  VizMap :: (a -> b) -> Viz a -> Viz b
--}  
+type Lens a b = (b -> b) -> a -> a

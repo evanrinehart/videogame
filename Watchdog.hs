@@ -1,42 +1,67 @@
+{-# LANGUAGE BangPatterns #-}
 module Watchdog where
 
 import Control.Concurrent
 import Control.Exception
+import Control.Monad (forM_)
+import System.Exit
 
 import Types
+import Common
 import LongSleep
 import Engine
 import GameState
+import Chrono
+import Scene
+import Output
+import Error
 
-type Watchdog = Prediction -> IO ()
+type Watchdog = Prediction ([Output],Scene) -> IO ()
 
-newWatchdog :: MVar Game -> IO Watchdog
-newWatchdog gmv = do
-  dogmv <- forkIO hang >>= newMVar
+newWatchdog :: MVar Scene -> ErrorMV -> Chrono -> IO Watchdog
+newWatchdog scmv errormv chrono = do
+  dogmv <- forkWatchdog errormv hang >>= newMVar
   return $ \next -> do
     mth <- tryTakeMVar dogmv
     case mth of
-      Nothing -> throwIO (userError "kickDog: watchdog thread not found")
+      Nothing -> throwIO (bug "kick" "watchdog thread not found")
       Just th -> killThread th
-    th <- forkIO (watchdogThread gmv next)
+    th <- forkWatchdog errormv (watchdogThread scmv chrono next)
     putMVar dogmv th
+
+forkWatchdog :: ErrorMV -> IO () -> IO ThreadId
+forkWatchdog errormv action = forkFinally action $ \result -> do
+  case result of
+    Left err -> case asyncExceptionFromException err of
+      Nothing -> putMVar errormv ("watchdog", err)
+      Just ThreadKilled -> return ()
+      Just _ -> putMVar errormv ("watchdog", err)
+    Right () -> return ()
     
-watchdogThread :: MVar Game -> Prediction -> IO a
-watchdogThread gmv next = loop next where
+watchdogThread :: MVar Scene -> Chrono -> Prediction ([Output],Scene) -> IO a
+watchdogThread scmv chrono next = loop next where
   loop Never = hang
   loop (NotBefore dt) = do
-    longSleep dt
-    next <- modifyMVar gmv $ \g -> do
-      let g' = elapse dt g
-      let next = detect g'
-      return (g', next)
+    t0 <- chronoGetCurrent chrono
+    let t1 = t0 + dt
+    longSleep (nanosToMicros dt)
+    next <- modifyMVar scmv $ \sc -> do
+      dt <- chronoDiff chrono t1
+      chronoSetTime chrono t1
+      let !sc' = elapse sc dt
+      let next = detect sc'
+      return (sc', next)
     loop next
-  loop (InExactly dt occ) = do
-    longSleep dt
-    next <- modifyMVar gmv $ \g -> do
-      let g' = elapse dt g
-      let (g'', output) = poke occ g'
-      let next = detect g'
-      --output
-      return (g', next)
+  loop (InExactly dt (outs, sc')) = do
+    t0 <- chronoGetCurrent chrono
+    let t1 = t0 + dt
+    longSleep (nanosToMicros dt)
+    next <- modifyMVar scmv $ \sc -> do
+      chronoSetTime chrono t1
+      let next = detect sc'
+      putStrLn "watchdog outputting"
+      forM_ outs execOutput
+      return (sc', next)
     loop next
+
+nanosToMicros n = n `div` 1000

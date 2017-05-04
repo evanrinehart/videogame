@@ -9,16 +9,19 @@ import Control.Monad
 import Control.Monad.Random
 
 import Types
+import Common
 import Rails
 import GameState
+import Graphics
+import Scene
 
 initialHighScores :: [(String, Integer)]
 initialHighScores =
-  [("BIF", 69696)
-  ,("BEJ", 50000)
-  ,("NER", 40000)
-  ,("ENE", 30000)
-  ,("VIN", 20000)]
+  [("BIF", 50000)
+  ,("BEJ", 40000)
+  ,("NER", 30000)
+  ,("ENE", 20000)
+  ,("VIN", 10000)]
 
 initialGameState :: GameState
 initialGameState = GameState 0 initialHighScores $ ModeGameplay $ GameCore
@@ -37,7 +40,12 @@ initialGameState = GameState 0 initialHighScores $ ModeGameplay $ GameCore
   , gcLimbo = []
   , gcSmoke = []
   , gcLevelNo = 1
-  , gcTest = []
   , gcRng = mkStdGen 0
-  , gcTest2 = False
   }
+
+gameScene :: GameState -> Scene
+gameScene gs = Scene el po de vi where
+  el dt = gameScene gs
+  po occ = ([], gameScene gs)
+  de = Never
+  vi = Blank
