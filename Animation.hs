@@ -2,6 +2,7 @@
 module Animation where
 
 import Types
+import Inf
 
 data Animation a where
   Pure :: a -> Animation a
@@ -11,7 +12,6 @@ data Animation a where
   After :: Delta -> Animation a -> (Animation a -> Animation a) -> Animation a
   Split :: Animation a -> Animation a -> Animation a
   Expired :: a -> Animation a
-  Fire :: Output -> Animation a -> Animation a
   Parallel :: [Animation a] -> Animation [a]
 
 primitive :: a -> (Delta -> a -> a) -> Animation a
@@ -28,6 +28,10 @@ expired = Expired
 
 parallel :: [Animation a] -> Animation [a]
 parallel = Parallel
+
+isExpired :: Animation a -> Bool
+isExpired (Expired _) = True
+isExpired _           = False
 
 instance Show a => Show (Animation a) where
   show a = show (view a)
@@ -52,7 +56,6 @@ view a0 = case a0 of
   After counter a k -> view a
   Split a1 a2 -> view a1
   Expired x -> x
-  Fire out a -> view a
   Parallel as -> map view as
 
 elapse :: Delta -> Animation a -> Animation a
@@ -66,7 +69,6 @@ elapse dt a0 = case a0 of
     | dt >= counter -> elapse (dt - counter) (k (elapse counter a))
   Split a1 a2 -> a0
   Expired x -> a0
-  Fire out a -> a0
   Parallel as -> Parallel (map (elapse dt) as)
 
 next :: Animation a -> AddInf Delta
@@ -80,38 +82,26 @@ next a0 = go Inf a0 where
     After counter a k -> min m (Fin counter)
     Split a1 a2 -> m
     Expired x -> m
-    Fire out a -> m
     Parallel as -> minimum (map (go m) as)
   
-reduce :: Animation a -> (Animation a, [Output])
-reduce a0 = go a0 [] where
-  go :: Animation a -> [Output] -> (Animation a, [Output])
-  go a0 outs = case a0 of
-    Pure x -> (a0, outs)
-    Fmap f a -> let (a',outs') = go a outs in (Fmap f a', outs')
-    Appl af ax ->
-      let (af', outs') = go af outs in
-      let (ax', outs'') = go ax outs' in
-      (Appl af' ax', outs'')
-    Primitive x f -> (a0, outs)
-    After counter a k ->
-      let (a', outs') = go a outs in (After counter a' k, outs)
-    Split a1 a2 -> (a0, outs)
-    Expired x -> (a0, outs)
-    Fire out a -> let (a', outs') = go a outs in (a', out:outs')
-    Parallel as ->
-      let (as', outs') = goPar as outs [] in
-      (Parallel (reverse as'), outs')
-  goPar :: [Animation a] -> [Output] -> [Animation a] -> ([Animation a], [Output])
-  goPar [] outs accum = (accum, outs)
-  goPar (a:as) outs accum =
-    let (accum',outs') = go1 a outs accum in
-    goPar as outs' accum'
-  go1 :: Animation a -> [Output] -> [Animation a] -> ([Animation a], [Output])
-  go1 a0 outs accum = case a0 of
-    Expired _ -> (accum, outs)
-    Fire out a -> go1 a (out:outs) accum
+reduce :: Animation a -> Animation a
+reduce a0 = go a0 where
+  go :: Animation a -> Animation a
+  go a0 = case a0 of
+    Pure x -> a0
+    Fmap f a -> Fmap f (go a)
+    Appl af ax -> Appl (go af) (go ax)
+    Primitive x f -> a0
+    After counter a k -> After counter (go a) k
+    Split a1 a2 -> a0
+    Expired x -> a0
+    Parallel as -> Parallel (goPar as)
+  goPar :: [Animation a] -> [Animation a]
+  goPar (a:as) = case a of
+    Expired _ -> goPar as
     Split a1 a2 ->
-      let (accum', outs') = go1 a1 outs accum in
-      go1 a2 outs' accum'
-    other -> let (a', outs') = go a0 outs in (a':accum, outs')
+      let a1' = go a1 in
+      let a2' = go a2 in
+      a1' : a2' : goPar as
+    other -> go a : goPar as
+  goPar [] = []

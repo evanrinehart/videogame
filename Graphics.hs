@@ -2,7 +2,8 @@
 module Graphics where
 
 import Data.Monoid ((<>))
-import Linear (V2(..), V3(..), V4(..))
+
+import Linear
 
 import Types
 

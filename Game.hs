@@ -1,3 +1,5 @@
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Game where
 
 import Data.HashMap.Strict (HashMap)
@@ -8,21 +10,21 @@ import System.Random
 import Control.Monad
 import Control.Monad.Random
 
+import Debug.Trace (trace)
+
 import Types
 import Common
 import Rails
 import GameState
 import Graphics
-import Scene
+import Prog
+import HighScore
+import Script
 
-initialHighScores :: [(String, Integer)]
-initialHighScores =
-  [("BIF", 50000)
-  ,("BEJ", 40000)
-  ,("NER", 30000)
-  ,("ENE", 20000)
-  ,("VIN", 10000)]
+debug :: Show a => String -> a -> a
+debug msg x = trace (msg ++ "=" ++ show x) x
 
+{-
 initialGameState :: GameState
 initialGameState = GameState 0 initialHighScores $ ModeGameplay $ GameCore
   { gcPlatforms = []
@@ -42,10 +44,12 @@ initialGameState = GameState 0 initialHighScores $ ModeGameplay $ GameCore
   , gcLevelNo = 1
   , gcRng = mkStdGen 0
   }
+-}
 
-gameScene :: GameState -> Scene
-gameScene gs = Scene el po de vi where
-  el dt = gameScene gs
-  po occ = ([], gameScene gs)
-  de = Never
-  vi = Blank
+
+root :: Prog Output (Credits, HighScores) Input Picture
+root = Prog st po vi where
+  st r = ([], root)
+  po r i = ([], root)
+  vi r = Blank
+

@@ -1,3 +1,4 @@
+{-# LANGUAGE MultiWayIf #-}
 module Scene where
 
 import Types
@@ -5,73 +6,122 @@ import Common
 import Graphics
 import SDL (InputMotion(Pressed))
 
+import Data.Monoid
+import Control.Applicative
 import Data.Char
+import Data.Maybe
 import Numeric
+import Varying
 
 import Linear
 
-data Scene = Scene
-  { elapse :: Delta -> Scene
-  , poke   :: Input -> ([Output], Scene)
-  , detect :: Prediction ([Output], Scene)
-  , view   :: Picture
+data Scene o r i a = Scene
+  { elapse :: Varying r -> Delta -> Scene o r i a
+  , poke   :: r -> i -> ([o], Scene o r i a)
+  , detect :: Varying r -> Prediction ([o], Scene o r i a)
+  , view   :: Varying r -> Varying a
   }
 
-dummyScene :: Scene
+type MainScene = Scene (Credits,HighScores) Input Output Picture
+
+instance (Monoid r, Show a) => Show (Scene o r i a) where
+  show sc = show (view sc mempty)
+
+dummyScene :: Monoid a => Scene o r i a
 dummyScene = Scene el po de vi where
-  el _ = dummyScene
-  po _ = ([], dummyScene)
-  de = Never
-  vi = Blank
+  el _ _ = dummyScene
+  po _ _ = ([], dummyScene)
+  de _ = Never
+  vi _ = mempty
 
-counterScene :: Integer -> Scene
-counterScene c = Scene el po de vi where
-  el dt = counterScene (c + dt)
-  po _ = ([], counterScene c)
-  de = Never
-  vi = gfxText (showIntAtBase 2 intToDigit (c `div` 100000000) "")
+instance Monoid a => Monoid (Scene o r i a) where
+  mempty = dummyScene
+  mappend = liftA2 (<>)
 
-sequenceScene :: [Delta] -> Scene
-sequenceScene [] = dummyScene
-sequenceScene (c:cs) = Scene el po de vi where
-  el dt | dt < c = sequenceScene (c-dt : cs)
-        | otherwise = error "shouldn't happen, missed an occurrence"
-  po _ = ([], dummyScene)
-  de = InExactly c ([PlaySound 0], sequenceScene cs)
-  vi = Blank
+instance Functor (Scene o r i) where
+  fmap f (Scene e p d v) = Scene e' p' d' v' where
+    e' r dt = fmap f (e r dt)
+    p' r i = fmap (fmap f) (p r i)
+    d' r = fmap (fmap (fmap f)) (d r)
+    v' r = fmap f (v r)
 
-seqTest = sequenceScene [0, ms 100, ms 100, ms 100, ms 1000, ms 1000]
+instance Applicative (Scene o r i) where
+  pure x = fmap (const x) (mempty :: Scene r i o ())
+  scf <*> scx = fmap (\(f,x) -> f x) (pairScene scf scx)
 
-controlScene :: Integer -> Scene
-controlScene c = Scene el po de vi where
-  el _ = controlScene c
-  po occ = case occ of
-    Inp (RawJoy Player1 North Pressed) -> ([], controlScene (c + 1))
-    Inp (RawJoy Player1 South Pressed) -> ([], controlScene (c - 1))
-    _ -> ([], controlScene c)
-  de = Never
-  vi = gfxText (showIntAtBase 2 intToDigit c "")
+pairScene :: Scene o r i a -> Scene o r i b -> Scene o r i (a,b)
+pairScene (Scene e1 p1 d1 v1) (Scene e2 p2 d2 v2) = Scene e3 p3 d3 v3 where
+  e3 r dt = pairScene (e1 r dt) (e2 r dt)
+  p3 r i =
+    let (os1, sc1') = p1 r i in
+    let (os2, sc2') = p2 r i in
+    (os1++os2, pairScene sc1' sc2')
+  d3 r =
+    let x = d1 r in
+    let y = d2 r in
+    if | x `predLT` y -> case x of
+          NotBefore dt -> NotBefore dt
+          InExactly dt (os,sc') -> InExactly dt (os, pairScene sc' (e2 r dt))
+       | y `predLT` x -> case y of
+          NotBefore dt -> NotBefore dt
+          InExactly dt (os,sc') -> InExactly dt (os, pairScene (e1 r dt) sc')
+       | otherwise -> case (x,y) of
+          (Never,Never) -> Never
+          (NotBefore dt, NotBefore dt') -> NotBefore dt
+          (InExactly dt (os1,sc1'), InExactly dt' (os2,sc2')) ->
+            InExactly dt (os1++os2, pairScene sc1' sc2')
+  v3 r = timeZip (,) (v1 r) (v2 r)
 
-splashScene :: Picture -> Scene
-splashScene img = splashLoop (ms 2500) (Just ()) where
-  splashLoop c pop = Scene el po de vi where
-    el dt = splashLoop (c - dt) pop
-    po _ = ([], splashLoop c pop)
-    de = case pop of
-      Nothing -> InExactly c ([], dummyScene)
-      Just () -> InExactly 0 ([PlaySound 0], splashLoop c Nothing)
-    vi = img
+omap :: (o -> o') -> Scene o r i a -> Scene o' r i a
+omap f (Scene e p d v) = Scene e' p' d' v' where
+  e' r dt = omap f (e r dt)
+  p' r i = let (outs, sc') = p r i in (map f outs, omap f sc')
+  d' r = fmap (\(outs,sc') -> (map f outs, omap f sc')) (d r)
+  v' = v
 
-pokes :: Input -> [Scene] -> ([Output], [Scene])
-pokes occ scs = go scs id [] where
-  go [] outs scs' = (outs [], reverse scs')
-  go (sc:scs) outsAcc scs' =
-    let (outs, sc') = poke sc occ in
-    go scs (outsAcc . (outs ++)) (sc':scs')
+imap :: (i' -> i) -> Scene o r i a -> Scene o r i' a
+imap f (Scene e p d v) = Scene e' p' d' v' where
+  e' r dt = imap f (e r dt)
+  p' r i = fmap (imap f) (p r (f i))
+  d' r = fmap (fmap (imap f)) (d r)
+  v' = v
 
-views :: [Scene] -> Picture
-views = mconcat . map view 
+justOut :: Scene (Maybe o) r i a -> Scene o r i a
+justOut (Scene e p d v) = Scene e' p' d' v' where
+  e' r dt = justOut (e r dt)
+  p' r i = let (outs, sc') = p r i in (catMaybes outs, justOut sc')
+  d' r = fmap (\(outs,sc') -> (catMaybes outs, justOut sc')) (d r)
+  v' = v
 
-elapses :: Delta -> [Scene] -> [Scene]
-elapses dt = map (\sc -> elapse sc dt)
+-- Nothings don't affect the scene
+-- Just i arrives as i without the Just
+justIn :: Scene o r i a -> Scene o r (Maybe i) a
+justIn sc@(Scene e p d v) = Scene e' p' d' v' where
+  e' r dt = justIn (e r dt)
+  p' r Nothing = ([], justIn sc)
+  p' r (Just i) = fmap justIn (p r i)
+  d' r = fmap (fmap justIn) (d r)
+  v' = v 
+
+
+identityScene :: Scene i a i a
+identityScene = Scene el po de vi where
+  el r dt = identityScene
+  po r i = ([i], identityScene)
+  de r = Never
+  vi r = r
+
+composeScene :: Scene o r i a -> Scene o' r' o r -> Scene o' r' i a
+composeScene (Scene e1 p1 d1 v1) (Scene e2 p2 d2 v2) = Scene e3 p3 d3 v3 where
+  e3 r' dt = 
+    let sc2' = e2 r' dt in
+    let sc1' = e1 (v2 r') dt in
+    composeScene sc1' sc2'
+  p3 r' i = undefined
+  d3 r' = case comparePred (d2 r') (d1 (v2 r')) of
+    LT -> undefined
+    GT -> undefined
+    EQ -> undefined
+  v3 r' = v1 (v2 r')
+
 
