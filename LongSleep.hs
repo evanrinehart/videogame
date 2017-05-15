@@ -11,7 +11,3 @@ longSleep micros
       threadDelay 1000000
       longSleep (micros - 1000000)  
 
-hang :: IO a
-hang = do
-  threadDelay 1000000
-  hang

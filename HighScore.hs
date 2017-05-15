@@ -8,9 +8,15 @@ import System.Directory
 import System.IO
 import Data.Char
 import Control.Monad
-import Control.Concurrent.STM
+import Control.Concurrent
+import Data.Time
+
+import Debug
 
 type HighScores = [(String,Integer)]
+type CommitChan = MVar (ValidEntry, MVar CommitStatus)
+
+data CommitStatus = CommitOK | CommitIncomplete deriving Show
 
 alphabet :: String
 alphabet = "abcdefghijklmnopqrstuvwxyz-_?!0123456789"
@@ -32,50 +38,47 @@ validateEntry name score = let lname = map toLower name in
      | score < 0                         -> Nothing
      | otherwise                         -> Just (ValidEntry lname score)
 
-file1 dir = dir ++ "/high_scores"
-file2 dir = dir ++ "/high_scores.1"
-file3 dir = dir ++ "/high_scores.2"
+tempName = "high_scores.temp"
+backupName = "high_scores.bak"
+finalName = "high_scores"
 
 fetchHighScores :: FilePath -> IO HighScores
 fetchHighScores dirpath = do
-  let path1 = file1 dirpath
-  let path2 = file2 dirpath
-  let path3 = file3 dirpath
-  touchFile path1
-  touchFile path2
-  touchFile path3
-  fmap parseHighScores (readFile path1) >>= \case
+  let tempPath = dirpath ++ "/" ++ tempName
+  let backupPath = dirpath ++ "/" ++ backupName
+  let finalPath = dirpath ++ "/" ++ finalName
+  touchFile backupPath
+  touchFile finalPath
+  fmap parseHighScores (readFile finalPath) >>= \case
     Right hs -> return hs
     Left msg -> do
-      hPutStrLn stderr ("parse high score file (1st try): " ++ msg)
-      renameFile path2 path1
-      renameFile path3 path2
-      fmap parseHighScores (readFile path1) >>= \case
+      logErr "main" "ERROR" ("parse high score file (1st try): " ++ msg)
+      timestamp <- formatTime defaultTimeLocale "%Y-%M-%dT%H:%M:%S" <$> getCurrentTime
+      let forensics = dirpath ++ "/high_scores.corrupted." ++ timestamp
+      renameFile finalPath forensics
+      renameFile backupPath finalPath
+      fmap parseHighScores (readFile finalPath) >>= \case
         Right hs -> return hs
         Left msg -> do
-          hPutStrLn stderr ("parse high score file (2nd try): " ++ msg)
-          renameFile path2 path1
-          fmap parseHighScores (readFile path1) >>= \case
-            Right hs -> return hs
-            Left msg -> do
-              hPutStrLn stderr ("parse high score file (3rd try): " ++ msg)
-              writeFile path1 (unparseHighScores initialHighScores)
-              return initialHighScores
+          logErr "main" "ERROR" ("parse high score file (2nd try): " ++ msg)
+          let forensics = dirpath ++ "/high_scores.corrupted.2." ++ timestamp
+          renameFile finalPath forensics
+          writeFile tempPath (unparseHighScores initialHighScores)
+          renameFile tempPath finalPath
+          return initialHighScores
 
+updateHighScores :: ValidEntry -> HighScores -> HighScores
+updateHighScores (ValidEntry name score) hs =
+  take 5 (insertEntry (map toUpper name) score hs)
 
-commitHighScore :: FilePath -> TVar HighScores -> ValidEntry -> IO ()
-commitHighScore dirpath tv (ValidEntry name score) = do
-  hs' <- atomically $ do
-    hs <- readTVar tv
-    let hs' = take 5 (insertEntry (map toUpper name) score hs)
-    writeTVar tv hs'
-    return hs'
-  let path1 = file1 dirpath
-  let path2 = file2 dirpath
-  let path3 = file3 dirpath
-  renameFile path2 path3
-  renameFile path1 path2
-  writeFile path1 (unparseHighScores hs')
+saveScores :: FilePath -> HighScores -> IO ()
+saveScores dirpath scores = do
+  let tempPath = dirpath ++ "/" ++ tempName
+  let backupPath = dirpath ++ "/" ++ backupName
+  let finalPath = dirpath ++ "/" ++ finalName
+  writeFile tempPath (unparseHighScores scores)
+  renameFile finalPath backupPath
+  renameFile tempPath finalPath
 
 insertEntry :: String -> Integer -> HighScores -> HighScores
 insertEntry name score [] = [(name,score)]
@@ -138,3 +141,5 @@ unparseHighScores :: HighScores -> String
 unparseHighScores [] = ""
 unparseHighScores ((name,score):next) =
   (name ++ " " ++ show score ++ "\n") ++ unparseHighScores next
+
+

@@ -3,6 +3,8 @@ module System where
 import Control.Concurrent.STM
 import Control.Concurrent
 import Control.Monad
+import Data.Maybe
+import Data.IORef
 
 import Types
 import Credits
@@ -14,12 +16,29 @@ data System = Sys
   { sysVideoOut      :: VideoOut
   , sysCtrlIn        :: ControlIn
   , sysSoundCtrl     :: SoundCtrlOut
-  , sysCreditsVar    :: TVar Integer    -- r/w
-  , sysHighScoresVar :: TVar HighScores -- read only
-  , sysCommitScore   :: CommitScore }
+  , sysCreditsVar    :: TVar Integer
+  , sysHighScores    :: STM HighScores
+  , sysCommitScore   :: ValidEntry -> IO CommitStatus }
 
-type VideoOut     = TMVar Picture
-type ControlIn    = TChan Input
+type ControlIn    = Chan Input
 type SoundCtrlOut = TChan SoundCtrl
-type CommitScore  = TMVar ValidEntry
 
+type VideoOut = (IORef Picture, MVar Picture)
+
+newVideoOut :: IO VideoOut
+newVideoOut = do
+  mv <- newEmptyMVar
+  ref <- newIORef Blank
+  return (ref, mv)
+
+writeVideo :: VideoOut -> Picture -> IO ()
+writeVideo (ref, mv) = putMVar mv
+
+readVideo :: VideoOut -> IO Picture
+readVideo (ref, mv) = do
+  r <- tryTakeMVar mv
+  case r of
+    Nothing -> readIORef ref
+    Just p -> do
+      writeIORef ref p
+      return p

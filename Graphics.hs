@@ -2,6 +2,7 @@
 module Graphics where
 
 import Data.Monoid ((<>))
+import Data.Char
 
 import Linear
 
@@ -20,19 +21,35 @@ instance Monoid Picture where
   mappend = Layer
 
 letterWidth :: Char -> Int
-letterWidth c = case c of
-  '0' -> 7
-  '1' -> 7
-  _ -> error ("letter width: bad letter (" ++ show c ++ ")")
+letterWidth c
+  | c == 'I' = 4
+  | c == 'T' = 6
+  | c == 'L' = 6
+  | c == 'Y' = 6
+  | c == ')' = 5
+  | c == '(' = 5
+  | c == ':' = 4
+  | c == '.' = 4
+  | otherwise = 7
+--  _ -> error ("letter width: bad letter (" ++ show c ++ ")")
+
+le row col = V2 (col * 8) (16 + row * 8)
+nu n = V2 (n * 8) 0
 
 letterSrc :: Char -> V2 Int
-letterSrc c = case c of
-  '0' -> V2 0 0
-  '1' -> V2 8 0
-  _ -> error ("letter source: bad letter (" ++ show c ++ ")")
+letterSrc c
+  | c >= '0' && c <= '9' = nu (ord c - ord '0')
+  | c >= 'A' && c <= 'Z' = let (q,r) = divMod (ord c - ord 'A') 8 in le q r
+  | c == '(' = le 3 4
+  | c == ')' = le 3 5
+  | c == ':' = le 3 6
+  | c == '.' = le 3 7
+  | c == '#' = le 4 0
+  | c == ' ' = le 3 2
+  | otherwise = le 3 3
 
 gfxText :: String -> Picture
-gfxText str = go 0 str where
+gfxText str = go 0 (map toUpper str) where
   go x "" = Blank
   go x (c:cs) =
     let w = letterWidth c in

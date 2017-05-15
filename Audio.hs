@@ -10,9 +10,12 @@ import Control.Monad
 import Control.Exception
 import Control.Concurrent.STM
 
+import Debug
+
 data Sound =
   CoinSound |
-  RegistrateSound
+  RegistrateSound |
+  SplashSound
     deriving Show
 
 data SoundCtrl =
@@ -23,8 +26,7 @@ audioCallback :: TChan SoundCtrl -> AudioFormat x -> IOVector x -> IO ()
 audioCallback ctrlCh Signed16BitLEAudio outbuf = do
   msgs <- atomically (readAlot ctrlCh)
   when (not (null msgs)) $ do
-    putStr "AUDIO: "
-    print msgs
+    logMsg "audio" (show msgs)
   let sampleCount = V.length outbuf
   forM_ [0..sampleCount-1] $ \i -> do
     V.write outbuf i 0

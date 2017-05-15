@@ -11,6 +11,8 @@ import Network
 
 import HighScore
 import Util
+import Debug
+import Error
 
 creditsReport :: Integer -> String
 creditsReport cr
@@ -29,32 +31,23 @@ subtractCredits tv amount = do
         writeTVar tv c'
         return (Right c')
   case result of
-    Left c -> hPutStrLn stderr $
-      "subtractCredits bug: taking " ++ show amount ++ " credits from " ++ show c
+    Left c -> logErr "main:credits" "BUG" $
+      "subtractCredits taking " ++ show amount ++ " credits from " ++ show c
     Right _ -> return ()
 
-saveCreditsCount :: Integer -> IO ()
-saveCreditsCount c = withCreditsDemon () $ \h -> do
-  hPutStrLn h (show c)
+saveCreditsCount :: Integer -> IO (Either SomeException ())
+saveCreditsCount c = withCreditsDemon $ \h -> hPutStrLn h (show c)
 
-fetchCreditsCount :: IO Integer
-fetchCreditsCount = withCreditsDemon 0 $ \h -> do
+fetchCreditsCount :: IO (Either SomeException Integer)
+fetchCreditsCount = withCreditsDemon $ \h -> do
   hPutStrLn h ""
   raw <- hGetLine h
   case parseNumber raw of
     Right (n,"") -> return n
-    Left _ -> do
-      hPutStrLn stderr ("bad result from credits demon " ++ show raw)
-      return 0
+    Left err -> throwIO (badFormatError err)
 
 connectToCreditsDemon :: IO Handle
 connectToCreditsDemon = connectTo "localhost" (PortNumber 9001)
   
-withCreditsDemon :: a -> (Handle -> IO a) -> IO a
-withCreditsDemon fallback action = do
-  hmm <- try $ bracket connectToCreditsDemon hClose action
-  case hmm of
-    Left e -> do
-      hPutStrLn stderr ("credits demon: "++show (e :: SomeException))
-      return fallback
-    Right x -> return x
+withCreditsDemon :: (Handle -> IO a) -> IO (Either SomeException a)
+withCreditsDemon action = try $ bracket connectToCreditsDemon hClose action
