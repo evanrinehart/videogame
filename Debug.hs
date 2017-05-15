@@ -67,7 +67,7 @@ fixedCol w txt =
   let txt' = right w txt in
   (replicate (w - length txt') ' ') ++ txt'
 
-whoW = 16
+whoW = 17
 
 getCurrentTimestamp :: IO String
 getCurrentTimestamp = fmap formatTimestamp fetchTime
@@ -83,12 +83,19 @@ loggerAgent = do
   putStrLn (stamp ++ " " ++ fixedCol whoW "o_O" ++ " >=====< Video Game (C) Evan R >=====<")
   forever $ do
     entry <- atomically (readTBQueue globalLogQueue)
-    stamp <- fmap formatTimestamp fetchTime
     case entry of
-      NormalLog who msg ->
-        putStrLn (stamp ++ " " ++ fixedCol whoW who ++ " " ++ msg)
-      ErrorLog who kind msg ->
-        hPutStrLn stderr (stamp ++ " " ++ fixedCol whoW who ++ " *" ++ kind ++ "* " ++ msg)
+      NormalLog who msg -> primLog who msg
+      ErrorLog who kind msg -> primLogErr who kind msg
+
+primLog :: String -> String -> IO ()
+primLog who msg = do
+  stamp <- fmap formatTimestamp fetchTime
+  putStrLn (stamp ++ " " ++ fixedCol whoW who ++ " " ++ msg)
+
+primLogErr :: String -> String -> String -> IO ()
+primLogErr who kind msg = do
+  stamp <- fmap formatTimestamp fetchTime
+  hPutStrLn stderr (stamp ++ " " ++ fixedCol whoW who ++ " *" ++ kind ++ "* " ++ msg)
 
 logMsg :: String -> String -> IO ()
 logMsg who msg = do

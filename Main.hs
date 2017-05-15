@@ -49,12 +49,15 @@ main = do
   let l = logMsg "main"
   l ""
   l "Monitoring critical agents."
+  let respawn io who = limitedRetrier (logErr who "ERROR") 3 io
+  let agent who f = (who, f who)
   threads <- async $ spawnGroup
-    [("credits-persist", creditsAgent sys)
-    ,("coin-slot", coinAgent sys)
-    ,("highscore-saver", wait hsAgent)
-    ,("scene", sceneThread sys videoOut initialScene)
-    ,("logger", wait logger)]
+    [ agent "credits"    (respawn $ creditsAgent sys)
+    , agent "coin-slot"  (respawn $ coinAgent sys)
+    , agent "highscores" (respawn $ hsAgent)
+    , agent "scene"      (respawn $ sceneThread sys videoOut initialScene)
+    , agent "logger"     (\_ -> wait logger)
+    ]
   l "Entering the main loop. Good luck!"
   performMajorGC
   forever $ do
@@ -95,9 +98,9 @@ main = do
         throwIO err
       Nothing -> return ()
 
-setup :: IO (Renderer, Texture, System, Async a, Async a)
+setup :: IO (Renderer, Texture, System, IO a, Async a)
 setup = do
-  logger <- async loggerAgent
+  logger <- async (limitedRetrier (primLogErr "o_O" "ERROR") 5 loggerAgent)
   let l = logMsg "main"
   l "Begin boot-up sequence"
   -- "global" STM vars and chans
@@ -121,7 +124,7 @@ setup = do
         putMVar commitCh (entry, ret)
         takeMVar ret
   let readHS = readTVar highScoresVar
-  hsAgent <- async (highScoreAgent highScoresVar commitCh soundCtrl "database")
+  let hsAgent = highScoreAgent highScoresVar commitCh soundCtrl "database"
   let sys = Sys videoOut ctrlIn soundCtrl creditsVar readHS commitAction
   -- sdl
   l "Initializing SDL... "
