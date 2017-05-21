@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Exp12 where
 
 -- TimeVar a. This is a value at a time. The value of this variable becomes
@@ -33,12 +34,14 @@ type UnsafeTimeFunc a = Time -> (CellStatus a, [(Time,a)])
 
 
 
+{-
 timeZip :: (a -> b -> c) -> a -> [(Time,a)] -> b -> [(Time,b)] -> [(Time,c)]
 timeZip f x0 arg1@((t1,x):xs) y0 arg2@((t2,y):ys)
   | t1 < t2 = (t1, f x y0) : timeZip f x xs y0 arg2
   | t2 < t1 = (t2, f x0 y) : timeZip f x0 arg1 y ys
   | otherwise = (t1, f x y) : timeZip f x xs y ys
 timeZip _ _ _ _ _ = []
+-}
 
 
 -- TimeVar
@@ -131,8 +134,6 @@ data CellStatus a =
   Initial a
     deriving (Functor, Show)
 
-type CellGuts a = (IORef (CellStatus a), IORef (E (a -> a)))
-
 cellValuePlus :: CellStatus a -> a
 cellValuePlus (Dormant _ x) = x
 cellValuePlus (Transit _ _ x) = x
@@ -204,17 +205,13 @@ nextR (RCons _ i) = Just (readTimeVar i)
 
 seekR :: Time -> R a -> R a
 seekR t r = case r of
-  RPure v -> let !x = cellValuePlus v in RPure (Dormant t x)
-  RCons v i
-    | t `greaterThanLastCellTime` v ->
-        case soonerTimeVar (pureTimeVar t undefined) i of
-          AWins _ _ -> let !x = cellValuePlus v in RCons (Dormant t x) i
-          BWins t' r' -> seekR t r'
-          ABTie _ _ r' ->
-            let !x = cellValuePlus v in
-            let !x' = headR r' in
-            RCons (Transit t x x') i
-    | otherwise -> r
+  RPure cell -> let !x = cellValuePlus cell in RPure (Dormant t x)
+  RCons cell i
+    | Just t <= cellStart cell -> r
+    | otherwise -> case soonerTimeVar (pureTimeVar t undefined) i of
+        AWins _ _ -> RCons (Dormant t (cellValuePlus cell)) i
+        BWins _ r' -> seekR t r'
+        ABTie _ _ r' -> r'
 
 at :: R a -> Time -> a
 at r t =
@@ -233,22 +230,51 @@ accum x0 e0 = go (Initial x0) e0 where
 --maxCellStatus :: CellStatus a -> CellStatus a -> CellStatus a
 --maxCellStatus 
 
-joinR :: R (R a) -> R a
+adjustR :: (CellStatus a -> CellStatus a) -> R a -> R a
+adjustR f (RPure cell) = RPure (f cell)
+adjustR f (RCons cell i) = RCons (f cell) i
+
+truncateCell :: Time -> a -> CellStatus a -> CellStatus a
+truncateCell newT newPriorX cell = case cell of
+  Initial x -> Transit newT newPriorX x
+  Transit t x1 x2
+    | newT >= t -> Transit newT newPriorX x2
+    | otherwise -> cell
+  Dormant t x
+    | newT >= t -> Transit newT newPriorX x
+    | otherwise -> cell
+
+cellStart :: CellStatus a -> Maybe Time
+cellStart (Initial _) = Nothing
+cellStart (Transit t _ _) = Just t
+cellStart (Dormant t _) = Just t
+
+
+joinR :: forall a . R (R a) -> R a
 joinR rr = go (headR rr) (transitions rr) where
-  go r e = case nextE e of
+  go :: R a -> E (R a, R a) -> R a
+  go r switch = case nextE switch of
     Nothing -> r
-    Just (te, (_,origr'), e') ->
-      let r' = seekR te origr' in
-      case r of
-        RPure x -> RCons x (pureTimeVar te (go r' e'))
-        RCons x i -> case soonerTimeVar (pureTimeVar te undefined) i of
-          AWins _ _ -> RCons x (pureTimeVar te (go r' e'))
-          BWins t r'' -> RCons x (pureTimeVar t (go (seekR t r'') e))
-          ABTie t _ _
-            | t /= te -> error "impossible"
-            | otherwise -> RCons (Transit t x0 x1) (pureTimeVar t (go r' e')) where
-                x0 = cellValueMinus x
-                x1 = headR r'
+    Just (tSwitch, (_,nextR), switch') ->
+      let cell = cellR r in
+      if cellStart cell == Just tSwitch
+      then -- skip cell, adjust, switch
+        let x = cellValueMinus cell in
+        let r' = adjustR (truncateCell tSwitch x) (seekR tSwitch nextR) in
+        go r' switch'
+      else if cellStart cell < Just tSwitch
+      then -- do one of two moves, accept this cell and move on
+           -- or accept this cell, truncate next behavior and switch.
+        let x = cellValuePlus cell in
+        let r' = adjustR (truncateCell tSwitch x) (seekR tSwitch nextR) in
+        let standardCut = RCons cell (pureTimeVar tSwitch (go r' switch')) in
+        case r of
+          RPure _ -> standardCut
+          RCons _ i -> case soonerTimeVar i (pureTimeVar tSwitch undefined) of
+            AWins t r'' -> RCons cell (pureTimeVar t (go r'' switch))
+            BWins _ _ -> standardCut
+            ABTie _ _ _ -> standardCut
+      else error "joinR bug 1"
 
 switcher :: R a -> E (R a) -> R a
 switcher start e = joinR $ accum start (fmap const e)
