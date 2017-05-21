@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveFunctor #-}
 module Exp12 where
 
 -- TimeVar a. This is a value at a time. The value of this variable becomes
@@ -26,8 +27,54 @@ data TimeVar a = TimeVar
   { readTimeVar :: (Time,a)
   , writeTimeVar :: Time -> a -> IO ()
   , tryReadTimeVar :: STM (Maybe (Time,a)) }
+
+type UnsafeTimeFunc a = Time -> (CellStatus a, [(Time,a)])
+
+data CellStatus a =
+  Dormant Time a |
+  Transit Time a a |
+  Initial a
+    deriving (Functor, Show)
+
+type CellGuts a = (IORef (CellStatus a), IORef (E (a -> a)))
+
+cellValuePlus :: CellStatus a -> a
+cellValuePlus (Dormant _ x) = x
+cellValuePlus (Transit _ _ x) = x
+cellValuePlus (Initial x) = x
+
+cellValueMinus :: CellStatus a -> a
+cellValueMinus (Dormant _ x) = x
+cellValueMinus (Transit _ x _) = x
+cellValueMinus (Initial x) = x
+
+lessThanLastCellTime :: Time -> CellStatus a -> Bool
+lessThanLastCellTime t (Initial _) = False
+lessThanLastCellTime t (Dormant t' _) = t < t'
+lessThanLastCellTime t (Transit t' _ _) = t < t'
+
+greaterThanLastCellTime :: Time -> CellStatus a -> Bool
+greaterThanLastCellTime t (Initial _) = True
+greaterThanLastCellTime t (Dormant t' _) = t > t'
+greaterThanLastCellTime t (Transit t' _ _) = t > t'
+
+instance Applicative CellStatus where
+  pure x = Initial x
+  (Initial f) <*> (Initial x) = Initial (f x)
+  (Initial f) <*> (Dormant t2 x) = Dormant t2 (f x)
+  (Initial f) <*> (Transit t2 x1 x2) = Transit t2 (f x1) (f x2)
+  (Dormant t1 f) <*> (Dormant t2 x) = Dormant (max t1 t2) (f x)
+  (Dormant t1 f) <*> (Transit t2 x x') = Transit (max t1 t2) (f x) (f x')
+  (Dormant t1 f) <*> (Initial x) = Dormant t1 (f x)
+  (Transit t1 f1 f2) <*> (Dormant t2 x) = Transit (max t1 t2) (f1 x) (f2 x)
+  (Transit t1 f1 f2) <*> (Transit t2 x1 x2) = Transit (max t1 t2) (f1 x1) (f2 x2)
+  (Transit t1 f1 f2) <*> (Initial x) = Transit t1 (f1 x) (f2 x)
+
+--data R a =
+--  RPure (CellStatus a) | RCons (CellStatus a) (TimeVar (R a))
+
 newtype E a = E [TimeVar a]
-newtype B a = B (Time -> a)
+newtype B a = B { unsafeSeek :: UnsafeTimeFunc a }
 
 instance Monoid a => Monoid (E a) where
   mempty = neverE
@@ -40,17 +87,33 @@ instance Functor E where
       Just (t,x,e') -> pureTimeVar t (f x) : go e'
 
 instance Functor B where
-  fmap f b = B (\t -> f (at b t))
+  fmap f b = B seek' where
+    seek' t = (fmap f st, map (fmap f) updates) where
+      (st,updates) = unsafeSeek b t
 
 instance Applicative B where
-  pure x = B (\t -> x)
-  bf <*> bx = B $ \t -> (at bf t) (at bx t)
+  pure x = B (\t -> (Initial x, []))
+  bf <*> bx = B seek' where
+    seek' t = (st', updates') where
+      (stf, upf) = unsafeSeek bf t
+      (stx, upx) = unsafeSeek bx t
+      st' = stf <*> stx
+      f0 = cellValuePlus stf
+      x0 = cellValuePlus stx
+      updates' = timeZip ($) f0 upf x0 upx
 
 data Sooner a b =
   AWins Time a |
   BWins Time b |
   ABTie Time a b
     deriving Show
+
+timeZip :: (a -> b -> c) -> a -> [(Time,a)] -> b -> [(Time,b)] -> [(Time,c)]
+timeZip f x0 arg1@((t1,x):xs) y0 arg2@((t2,y):ys)
+  | t1 < t2 = (t1, f x y0) : timeZip f x xs y0 arg2
+  | t2 < t1 = (t2, f x0 y) : timeZip f x0 arg1 y ys
+  | otherwise = (t1, f x y) : timeZip f x xs y ys
+timeZip _ _ _ _ _ = []
 
 newTimeVar :: IO (TimeVar a)
 newTimeVar = do
@@ -149,88 +212,40 @@ nextE (E (i:is)) =
 instance Show a => Show (E a) where
   show (E is) = show (map readTimeVar is)
 
-data AccumStatus a =
-  Dormant Time a |
-  Transit Time a a |
-  Initial a
-    deriving Show
-
-cellTimeLT :: Time -> IORef (AccumStatus a) -> IO Bool
-cellTimeLT t ref = do
-  st <- readIORef ref
-  case st of
-    Dormant t' _ -> return (t' < t)
-    Transit t' _ _ -> return (t' < t)
-    Initial _ -> return True
-
 at :: B a -> Time -> a
-at (B f) t = f t
+at (B seek) t = case seek t of
+  (st, _) -> cellValueMinus st
 
-magicAccumFunc ::
-  IORef (AccumStatus a) -> IORef (E (a -> a)) -> Time -> a
-magicAccumFunc vv ve t =
-  unsafePerformIO $ fix $ \loop -> do
-    mr <- do
-      let err n = throwIO (TimeError n)
-      e <- readIORef ve
-      case e of
-        E [] -> do
-          v <- readIORef vv
-          case v of
-            Dormant t' x
-              | t >= t' -> return (Just x)
-              | otherwise -> err 1
-            Transit t' x0 x1
-              | t == t' -> return (Just x0)
-              | t > t' -> return (Just x1)
-              | otherwise -> err 2
-            Initial x -> return (Just x)
-        E (i:is) -> case soonerTimeVar (pureTimeVar t undefined) i of
-          AWins _ _ -> do
-            v <- readIORef vv
-            case v of
-              Dormant t' x
-                | t >= t' -> return (Just x)
-                | otherwise -> err 3
-              Transit t' x0 x1
-                | t > t' -> do
-                    writeIORef vv (Dormant t x1)
-                    return (Just x1)
-                | t == t' -> return (Just x0)
-                | otherwise -> err 4
-              Initial x -> return (Just x)
-          BWins te _ -> do
-            let Just (_, f, e') = nextE e
-            v <- readIORef vv
-            let arg = case v of
-                  Dormant t' x -> x
-                  Transit t' x0 x1 -> x1
-                  Initial x -> x
-            writeIORef vv (Dormant te (f arg))
-            writeIORef ve e'
-            return Nothing
-          ABTie _ _ _ -> do
-            let Just (_, f, e') = nextE e
-            v <- readIORef vv
-            case v of
-              Dormant t' x -> do
-                when (t < t') (err 5)
-                writeIORef vv (Transit t x (f x))
-                writeIORef ve e'
-                return (Just x)
-              Transit t' x0 x1 -> do
-                when (t < t') (err 6)
-                writeIORef vv (Transit t x1 (f x1))
-                writeIORef ve e'
-                return (Just x1)
-              Initial x -> do
-                writeIORef vv (Transit t x (f x))
-                writeIORef ve e'
-                return (Just x)
-            return Nothing
-    case mr of
-      Nothing -> loop
-      Just ans -> return ans
+seekCellTo :: CellGuts a -> Time -> IO [(Time,a)]
+seekCellTo (vv,ve) t = begin where
+  begin = do
+    v <- readIORef vv
+    when (t `lessThanLastCellTime` v) (throwIO (TimeError 1))
+    backwards <- collect []
+    return (reverse backwards)
+  collect changes = do
+    e <- readIORef ve
+    v <- readIORef vv
+    case e of
+      E [] -> return changes
+      E (i:is) -> case soonerTimeVar (pureTimeVar t undefined) i of
+        AWins _ _ -> do
+          writeIORef vv (Dormant t (cellValuePlus v))
+          return changes
+        BWins te _ -> do
+          let Just (_, f, e') = nextE e
+          let x = cellValuePlus v
+          let x' = f x
+          writeIORef vv (Dormant te x')
+          writeIORef ve e'
+          collect ((te,x'):changes)
+        ABTie _ _ _ -> do
+          let Just (_, f, e') = nextE e
+          let x = cellValuePlus v
+          let x' = f x
+          writeIORef vv (Transit t x x')
+          writeIORef ve e'
+          return ((t,x'):changes)
 
 data TimeError = TimeError Int deriving Show
 
@@ -259,9 +274,6 @@ fromListE xs = E (go xs) where
   go [] = []
   go ((t,x):rest) = pureTimeVar t x : go rest
 
-fromFunctionB :: (Time -> a) -> B a
-fromFunctionB f = B f
-
 timeShiftB :: Time -> B a -> B a
 timeShiftB dt (B f) = B (f . (subtract dt))
 
@@ -279,15 +291,16 @@ neverE = E []
 
 accum :: a -> E (a -> a) -> B a
 accum x0 e0 = unsafePerformIO $ do
-  vv <- newIORef (Initial x0)
-  ve <- newIORef e0
-  let magic = magicAccumFunc vv ve
-  anchor <- newMVar (vv,magic)
+  vv0 <- newIORef (Initial x0)
+  ve0 <- newIORef e0
+  anchor <- newMVar (vv0,ve0)
   w <- mkWeakMVar anchor (return ())
   ch <- dupChan globalHousekeepingChan
-  forkIO (accumKludgeThread w ch)
-  return $ B $ \t -> unsafePerformIO $ withMVar anchor $ \(_,magic) -> do
-    return (magic t)
+  forkIO (cellKludgeThread w ch)
+  return $ B $ \t -> unsafePerformIO $ withMVar anchor $ \guts@(vv,ve) -> do
+    v <- readIORef vv
+    updates <- seekCellTo guts t
+    return (v,updates)
 
 hmm n = do
   let b = test n
@@ -296,21 +309,27 @@ hmm n = do
 hmm2 b = do
   threadDelay 1000000
   writeChan globalHousekeepingChan 3
+  threadDelay 1000
   print (at b 3)
   threadDelay 1000000
   writeChan globalHousekeepingChan 4
+  threadDelay 1000
   print (at b 4)
   threadDelay 1000000
   writeChan globalHousekeepingChan 5
+  threadDelay 1000
   print (at b 5)
   threadDelay 1000000
   writeChan globalHousekeepingChan 6
+  threadDelay 1000
   print (at b 6)
   threadDelay 1000000
   writeChan globalHousekeepingChan 7
+  threadDelay 1000
   print (at b 7)
   threadDelay 1000000
   writeChan globalHousekeepingChan 8
+  threadDelay 1000
   print (at b 8)
   hmm3 30
 
@@ -323,23 +342,28 @@ hmm3 n = do
 
 test n = accum n (fromListE [(1000,succ),(2000,succ),(3000,succ)])
 
-accumKludgeThread ::
-  Weak (MVar (IORef (AccumStatus a), Time -> a)) -> Chan Time -> IO ()
-accumKludgeThread w houseKeeping = loop where
+cellKludgeThread ::
+  Weak (MVar (CellGuts a)) -> Chan Time -> IO ()
+cellKludgeThread w houseKeeping = loop where
   loop = do
     now <- readChan houseKeeping
     r <- deRefWeak w
     case r of
       Nothing -> do
-        print "No magic container, I go poof"
+        threadDelay 1234
+        print "No more object, I go poof"
       Just mv -> do
-        withMVar mv $ \(ref,magicSeek) -> do
-          old <- cellTimeLT now ref
-          when old $ do
-            let x = magicSeek now
-            evaluate x
-            print "evaluated."
-            return ()
+        print now
+        print "checking..."
+        withMVar mv $ \guts@(vv,ve) -> do
+          v <- readIORef vv
+          case v of
+            Initial _ -> print "initial."
+            Dormant t _ -> print ("dormant " ++ show t)
+            Transit t _ _ -> print ("transit " ++ show t)
+          when (now `greaterThanLastCellTime` v) $ do
+            seekCellTo guts now
+            print "seeked."
         loop
 
 snapshot :: E (a -> b) -> B a -> E b
@@ -354,11 +378,13 @@ snapshot e b = E (go e) where
 snapshot_ :: E b -> B a -> E a
 snapshot_ e b = snapshot (fmap (\_ -> id) e) b
 
+{-
 switcher :: B a -> E (B a) -> B a
-switcher b0 e = B f where
-  f t = at (fmap (g t) v) t
+switcher b0 e = B seek' where
+  seek' t = at (fmap (g t) v) t where
   g t b = at b t
   v = accum b0 (fmap const e)
+-}
 
 justE :: E (Maybe a) -> E a
 justE e = E (go e) where
@@ -435,14 +461,16 @@ es = fromListE (zip [5,6..] (cycle [const 'y', const 'z']))
 es2 :: E (B Char)
 es2 = fromListE (zip [10,20..] (cycle [b1, b2]))
 
+{-
 b3 :: B Char
 b3 = switcher b1 es2
+-}
 
 b4 :: B Integer
 b4 = accum 0 (fromListE $ zip [1,2..] (repeat (succ)))
 
 es3 = fromListE (zip [10,20..] (cycle [pure 0, b4]))
 
-b5 = switcher b4 es3
+--b5 = switcher b4 es3
 
 pulses = fromListE (zip [0,1..] (repeat ()))
