@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Exp12 where
+module FRP where
 
 -- TimeVar a. This is a value at a time. The value of this variable becomes
 -- known to us at some real time, and never changes, so is pure.
@@ -13,14 +13,19 @@ import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM
+import Control.Applicative
 import Data.Function
+import System.IO
 import System.IO.Unsafe
 import System.Clock
 import Data.IORef
 import Control.Monad
 import System.Mem.Weak
 import System.Random
+import Data.List
+import Data.Monoid
 import GHC.Prim
+import qualified GHC.Conc as C
 
 import Data.Char
 
@@ -56,11 +61,16 @@ data Sooner a b =
   ABTie Time a b
     deriving Show
 
-newTimeVar :: IO (TimeVar a, Time -> a -> IO ())
-newTimeVar = do
+newTimeVarIO :: IO (TimeVar a, Time -> a -> IO ())
+newTimeVarIO = do
   mv <- newEmptyTMVarIO
   let write t x = atomically (tryPutTMVar mv (t,x) >> return ())
-  let value = unsafePerformIO $ atomically (readTMVar mv)
+{-
+  let value = unsafePerformIO $ catch
+                (atomically (readTMVar mv))
+                (\(e :: BlockedIndefinitelyOnSTM) -> hang)
+-}
+  let value = unsafePerformIO (atomically (readTMVar mv))
   let tryRead = tryReadTMVar mv
   return (TimeVar value tryRead, write)
 
@@ -68,6 +78,12 @@ pureTimeVar :: Time -> a -> TimeVar a
 pureTimeVar t x = TimeVar
   (t,x)
   (return (Just (t,x)))
+
+readTimeVarIO :: TimeVar a -> IO (Time,a)
+readTimeVarIO i = do
+  let v = readTimeVar i
+  evaluate v
+  return v
 
 data Rumsfeld a b =
   KnownKnown (Time,a) (Time,b) |
@@ -126,6 +142,18 @@ soonerTimeVar tv1 tv2 = unsafePerformIO $ fix $ \restart -> do
         Nothing -> restart
         Just ans -> return ans
 
+data Sooner' a =
+  TimeFirst |
+  TimeVarFirst Time a |
+  SameTime a
+    deriving (Show,Functor)
+
+soonerTime :: Time -> TimeVar a -> Sooner' a
+soonerTime t i = case soonerTimeVar (pureTimeVar t undefined) i of
+  AWins _ _ -> TimeFirst
+  BWins t x -> TimeVarFirst t x
+  ABTie t _ y -> SameTime y
+
 -- cell status
 
 data CellStatus a =
@@ -180,10 +208,14 @@ instance Functor R where
 
 instance Applicative R where
   pure x = RPure (Initial x)
-  RCons f i1 <*> RCons x i2 = undefined
-  RCons f i1 <*> RPure x = undefined
-  RPure f <*> RCons x i2 = undefined
+  RCons f i1 <*> RCons x i2 = error "R appl"
+  RCons f i1 <*> RPure x = error "R appl"
+  RPure f <*> RCons x i2 = error "R appl"
   RPure f <*> RPure x = RPure (f <*> x)
+
+instance Monad R where
+  return = pure
+  r >>= f = joinR (fmap f r)
 
 instance Show a => Show (R a) where
   showsPrec d (RPure v) = showParen (d > 10) $
@@ -208,15 +240,10 @@ seekR t r = case r of
   RPure cell -> let !x = cellValuePlus cell in RPure (Dormant t x)
   RCons cell i
     | Just t <= cellStart cell -> r
-    | otherwise -> case soonerTimeVar (pureTimeVar t undefined) i of
-        AWins _ _ -> RCons (Dormant t (cellValuePlus cell)) i
-        BWins _ r' -> seekR t r'
-        ABTie _ _ r' -> r'
-
-at :: R a -> Time -> a
-at r t =
-  let !r' = seekR t r in
-  headR r'
+    | otherwise -> case soonerTime t i of
+        TimeFirst -> RCons (Dormant t (cellValuePlus cell)) i
+        TimeVarFirst _ r' -> seekR t r'
+        SameTime r' -> r'
 
 accum :: a -> E (a -> a) -> R a
 accum x0 e0 = go (Initial x0) e0 where
@@ -270,10 +297,10 @@ joinR rr = go (headR rr) (transitions rr) where
         let standardCut = RCons cell (pureTimeVar tSwitch (go r' switch')) in
         case r of
           RPure _ -> standardCut
-          RCons _ i -> case soonerTimeVar i (pureTimeVar tSwitch undefined) of
-            AWins t r'' -> RCons cell (pureTimeVar t (go r'' switch))
-            BWins _ _ -> standardCut
-            ABTie _ _ _ -> standardCut
+          RCons _ i -> case soonerTime tSwitch i of
+            TimeFirst -> standardCut
+            TimeVarFirst t r'' -> RCons cell (pureTimeVar t (go r'' switch))
+            SameTime _ -> standardCut
       else error "joinR bug 1"
 
 switcher :: R a -> E (R a) -> R a
@@ -315,6 +342,12 @@ nextE (E []) = Nothing
 nextE (E (i:is)) =
   let (t,x) = readTimeVar i in
   Just (t, x, E is)
+
+seekE :: Time -> E a -> E a
+seekE t (E []) = E []
+seekE t e@(E (i:is)) =
+  let (t', x) = readTimeVar i in
+  if t > t' then seekE t (E is) else e
 
 fromListE :: [(Time,a)] -> E a
 fromListE xs = E (go xs) where
@@ -406,12 +439,12 @@ terminateE e ender = E (go e ender) where
 spawnerE :: Monoid a => E (E a) -> E a
 spawnerE spawn = E (go spawn neverE) where
   go spawn@(E (sp:sps)) es@(E (i:is)) = case soonerTimeVar sp i of
-    AWins t e -> go (E sps) (mergeE es e)
+    AWins t e -> go (E sps) (mergeE es (seekE t e))
     BWins t x -> pureTimeVar t x : go spawn (E is)
-    ABTie t e x -> go (E sps) (mergeE (E is) e)
+    ABTie t e x -> go (E sps) (mergeE (E is) (seekE t e))
   go spawn (E []) = case nextE spawn of
     Nothing -> []
-    Just (t,e,spawn') -> go spawn' e
+    Just (t,e,spawn') -> go spawn' (seekE t e)
   go (E []) (E is) = is
 
 timeShiftE :: Time -> E a -> E a
@@ -429,21 +462,107 @@ mapWithTimeE f e = E (go e) where
 modernizeE :: E (E a) -> E (E a)
 modernizeE es = mapWithTimeE timeShiftE es
 
-sinkEIO :: E a -> (Time -> a -> IO ()) -> IO ()
-sinkEIO e act = case nextE e of
-  Nothing -> return ()
-  Just (t,x,e') -> do
+
+
+-- runner
+
+withOutputESink :: E a -> (Time -> a -> IO ()) -> (Async () -> IO b) -> IO b
+withOutputESink e push action = withAsync (outputWorker e) $ action where
+  outputWorker e = case nextE e of
+    Just (!t,x,e') -> do
+      now <- getCurrentGlobalTime
+      when (now < t) $ do
+        let micros = nanoToMicro (t - now)
+        threadDelay micros
+      push t x
+      outputWorker e'
+    Nothing -> return ()
+
+withOutputRPoller :: R a -> (Time -> a -> IO ()) -> (Async () -> IO b) -> IO b
+withOutputRPoller b push action = withAsync (outputWorker b) $ action where
+  outputWorker b = forever $ do
     now <- getCurrentGlobalTime
-    when (now < t) (threadDelay (nanoToMicro (t - now)))
-    act t x
-    sinkEIO e' act
+    let !b' = seekR now b
+    let !x = headR b'
+    push now x
 
-sourceEIO :: IO (Time,a) -> IO (E a)
-sourceEIO pull = return (E (next ())) where
-  next _ = unsafePerformIO $ do
-    (t,x) <- pull
-    return (pureTimeVar t x : next ())
+withExternalInputE :: IO a -> (E a -> Async () -> IO b) -> IO b
+withExternalInputE pull action = do
+  mv <- newEmptyMVar
+  let magic = magicTimeVarSequence mv
+  withAsync (inputWorker mv) $ action (E magic) where
+  inputWorker mv = forever $ do
+    x <- pull
+    now <- getCurrentGlobalTime
+    write <- takeMVar mv
+    write now x
 
+withPeriodicWinch :: (Async () -> IO b) -> IO b
+withPeriodicWinch action = withAsync winch $ action where
+  winch = forever $ do
+    threadDelay 100000
+    now <- getCurrentGlobalTime
+    writeChan globalHousekeepingChan now
+
+withHousekeepingVacuum :: (Async () -> IO b) -> IO b
+withHousekeepingVacuum action = withAsync suck action where
+  suck = do
+    readChan globalHousekeepingChan
+    suck
+
+prog :: E Int -> (R Bool, E String)
+prog e = (image, out <> out2 <> fmap f e) where
+  image = pure False
+  out = fromListE [(1,"a"),(2,"b"),(3,"c"),(4,"d"),(5,"e")]
+  out2 = fromListE [(3,"a"),(4,"b"),(5,"c"),(6,"d"),(7,"e")]
+  f i = [chr i]
+
+fram0 :: IO Int
+fram0 = threadDelay 1000000 >> return 13
+--fram1 b = putStrLn ("poll: " ++ show b) >> threadDelay 105000
+fram1 b = threadDelay 105000
+fram2 c = putStrLn ("output: " ++ show c)
+
+runFRP :: IO a -> (b -> IO ()) -> (c -> IO ()) -> (E a -> (R b, E c)) -> IO ()
+runFRP getIn out1 out2 program = do
+  setGlobalProgramStartTime
+  withHousekeepingVacuum $ \vacA -> do
+    withExternalInputE getIn $ \ein inA -> do
+      let (rout, eout) = program ein
+      withOutputESink eout (const out2) $ \out1A ->
+        withOutputRPoller rout (const out1) $ \out2A ->
+          withPeriodicWinch $ \winchA -> do
+            (a, result) <- waitAnyCatch [inA, out1A, out2A, winchA, vacA]
+            let who | a == inA = "input-worker"
+                    | a == out1A = "output-worker"
+                    | a == out2A = "output-poller"
+                    | a == winchA = "winch"
+                    | a == vacA = "vacuum"
+                    | otherwise = "unknown"
+            case result of
+              Left err -> do
+                hPutStrLn stderr (who ++ " crashed")
+                throwIO err
+              Right () -> do
+                putStrLn (who ++ " ended")
+
+
+-- runner
+
+-- the runner takes a (E Input -> (B Picture, E Output)) and needs to
+-- be care to do the following the things start running the program.
+-- also it takes a blocking, IO Input, a blocking, Picture -> IO ()
+-- and a Output -> IO (). ok.
+--
+-- first first, set the global program start time.
+-- first create an E Input from the IO Input using sourceEIO.
+-- then create the renderer and output executors with sinkEIO.
+-- ... the sourceEIO needs to get the global time when pushing inputs.
+-- ... there needs to be a thread consuming and dropping the outputs of
+-- the actual global housekeeping thread, since everything using that is using
+-- a dup. finally we need a periodic write to the global housekeeping thread
+-- with the time of the latest pull. when the video thread checks the world
+-- at time t. right after that, do housekeeping for time t.
 
 -- testing
 
@@ -457,7 +576,7 @@ loopTest c0 = n2 where
 runTest :: Nano -> Char -> Nano -> Char -> IO ()
 runTest delay1 c1 delay2 c2 = do
   now <- getCurrentGlobalTime
-  (t1,wr) <- newTimeVar
+  (t1,wr) <- newTimeVarIO
   let t2 = pureTimeVar (now + delay2) 'p'
   forkIO $ do
     threadDelay (floor (delay1 * 1000000))
@@ -466,6 +585,8 @@ runTest delay1 c1 delay2 c2 = do
   print now
   print (soonerTimeVar t1 t2)
 
+
+{-
 hmm n = do
   let b = loopTest 'a'
   hmm2 b
@@ -503,7 +624,7 @@ hmm3 n = do
   writeChan globalHousekeepingChan (60 - n)
   print ("done " ++ show n)
   hmm3 (n-1)
-
+-}
 {-
 test :: Int -> B Int
 test n = accum n (fromListE [(1000,succ),(2000,succ),(3000,succ)])
@@ -512,11 +633,13 @@ test n = accum n (fromListE [(1000,succ),(2000,succ),(3000,succ)])
 
 nanoToMicro nano = floor (nano * 1000000)
 
+{-
 testSink = do
   let e = fromListE [(0,'a'),(1,'b'),(2,'c')]
   setGlobalProgramStartTime
   sinkEIO e $ \t c -> do
     print (t,c)
+-}
 
 b1 :: R Char
 b1 = pure 'a'
@@ -544,6 +667,138 @@ pulses = fromListE (zip [0,1..] (repeat ()))
 
 
 
+{-
+pulseGenerator :: R Double -> E ()
+pulseGenerator freq = output where
+  samplerPulses = zip [0.1, 0.2 .. ] (repeat ())
+  samples = snapshot (fmap const samplerPulses) freq
+  pulseBundles = fmap f samples
+  f phi = fromListE [(0,()), (1, ()), (2, ())]
+  output = spawnerE pulseBundles
+-}
+
+{-
+how to use a pulse generator somewhere besides the beginning of time.
+you need to shift the freq signal back by time equal to current time.
+you need to shift the pulse outputs forward in time equal to current
+time. the absolute time that you instantiate the pulse generator.
+
+you have an R In -> E Out.
+which expects R and E data to begin at t=0.
+
+ok, so we can easily take an R happening in modern times, if we had it,
+and shift it back to 0. after applying the above function to get an E,
+we can shift it forward by the same amount to let it merge with the main 
+output stream.
+
+simple enough? well were does this R-in-modern times come from, which isnt
+itself from the beginning of time and in dire need to seekR? realistically
+this R may be part of a larger object the pulse generator is being used in.
+ok. so that pushes the question down the line.
+
+the horizontal motion machine for a hero will need a signal for "left" "right"
+or "neutral". this signal is given as input to the hero as a whole. ok
+where does that come from.  because we will probably want to instantiate the
+hero as a whole, all this is happening at the same time.
+
+ok, left/right/neutral is coming from a state machine which is part of the
+hero, no actually we should probably leave that on the outside. fine. so
+thats the interface. when the hero is dead, and respawns, right, so lets
+say the hero is a single switcher. and to make it switch, for instance to
+the "alive" state after a respawn, we need a E (R Hero). We also need a
+E (E Sound) which happens at the same time so we can hear the footsteps.
+these will react in the dedicated hero switcher. but where do you get the
+proper E (R Hero). lets say you have a function
+hero :: R HCtrl -> E Jump -> (R Hero, E Sound)
+To get the R Hero and E Sound, we need R HCtrl and E Jump. The inputs should
+come from the outside system already in progress, at non zero absolute time.
+enterR :: R a -> E (R a -> b) -> E b
+enterE :: E a -> E (E a -> b) -> E b
+ok, so these are defined as, when the event happens, the version of R or E
+argument at the time of the event, with past forgotten, is applied to the
+contained function and the result is output. ... and also the R or E is then
+shifted back to 0, based on the time of this event. one enterR followed by
+an enterE would give us an E (R Hero, E Sound) from from an E carrying the
+hero function. 
+
+they are the right types, after fmap fst and fmap snd, to feed into the
+switchers. but...
+both outputs are relative to t = 0, as per the functions convention.
+we cant really use them until they are fixed up, shifted forward by an 
+amount equal to the instantiation time of the hero.
+
+exitR :: R Time -> E (R a) -> E (R a)
+exitE :: R Time -> E (E a) -> E (E a)
+
+these two are defined as... whatever events or behaviors going through here
+are shifted forward by the amount in the B Time, which would need to be set
+by the same instantiation event as the hero. since we expect events and
+behaviors entering to be shifted way back in the past, this would give data
+situated right now in time. once you have *these* E (E a), E (R a)... you
+can send them to switchers, whose output is merged into the main stream.
+exitR and exitE can be implemented with regular primitives.
+
+the other two... im not sure if they can be done with regular primitives.
+here are new primitives that could do it.
+R a -> E () -> E (R a), which is like snapshot but instead of sampling the
+behavior, you get the behavior itself, frozen in time. this has major
+potential to cause a space leak!
+
+E a -> E () -> E (E a), is similar. it can be basically like a mergeE
+but the left events are ignored and the right events cause the left event
+tself to be output in raw form. if they happen at the same time, the event
+the was about to happen is preserved in the output.  call them...
+
+captureR captureE
+
+so how do you encapsulate this so its not such a pain in the ass.
+
+heroHarness ::
+  R HCtrl -> E Jump -> E (R HCtrl -> E Jump -> (R Hero, E Sound)) -> 
+  (R Hero, E Sound)
+except the constructor is a constant. in reality you would use E () as
+the spawn signal or E (A,B,C) for the start data, which would be the
+first few arguments to the constructor. then the function payload would
+not really be a constant anymore, but still, it would not be an input
+to the harness. essentially, after this point, the player can play normally
+until dead, in which case the switchers would get null data until a respawn
+event happens. OK.
+
+thats heros, what about items and enemies, both which form a dynamic collection.
+so think about all the crap we did for (one) hero, how do we solve a whole
+gaggle of goons!
+
+this is getting big enough to go into a notes file.
+
+-- tangent into doing IO actions somehow during this thing.
+
+E (IO a) -> E (Either SomeException a)
+when the event happens, the IO action begins asynchronously.
+if another event happens before it comes back, they line up in a queue.
+when the result is available, the output event occurs. could be useful.
+how does it play into the FRP semantics. you could assign a sequence of
+Time -> a -> (Time, Either SomeException a) to each such event. or you
+would say the output events never occur... how useless!
+
+-}
+  
+
+-- magic
+
+-- the way this works is, by looking at the sequence, you cause an IO action
+-- to define the next element to be placed in the MVar. Then it outputs
+-- a TimeVar which is yet unknown until something (another thread) takes that
+-- action and uses it. At which time the stream can continue.
+magicTimeVarSequence :: MVar (Time -> a -> IO ()) -> [TimeVar a]
+magicTimeVarSequence mv = unsafePerformIO $ do
+  (var, write) <- newTimeVarIO
+  putMVar mv write
+  return (var : magicTimeVarSequence mv)
+
+hang :: IO a
+hang = do
+  threadDelay 10000000
+  hang
 
 -- globals
 
