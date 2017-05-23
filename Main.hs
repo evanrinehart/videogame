@@ -34,6 +34,7 @@ import Debug
 import Splash
 import LongSleep
 import HighScoreAgent
+import Gameplay
 
 sampleRate = 44100
 audioBufferSize = 2048
@@ -45,7 +46,7 @@ main = do
   (sdlRenderer, sprites, sys, hsAgent, logger) <- setup
   let videoOut = sysVideoOut sys
   let ctrlIn = sysCtrlIn sys
-  let initialScene = splashScene sys
+  let initialScene = gameplayScene sys
   let l = logMsg "main"
   l ""
   l "Monitoring critical agents."

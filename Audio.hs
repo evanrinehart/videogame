@@ -19,9 +19,17 @@ data Sound =
     deriving Show
 
 data SoundCtrl =
-  PlaySound Sound
+  ResetSampleCounter AbsoluteTime |
+  PlaySound Sound |
+  PlaySoundAt SampleIndex Sound |
+  SoundOn SampleIndex Int |
+  SoundOff SampleIndex Int
     deriving Show
 
+type SampleIndex = Integer -- samples
+type AbsoluteTime = Integer -- nanoseconds
+
+-- TODO pass in an IORef for sample counter
 audioCallback :: TChan SoundCtrl -> AudioFormat x -> IOVector x -> IO ()
 audioCallback ctrlCh Signed16BitLEAudio outbuf = do
   msgs <- atomically (readAlot ctrlCh)

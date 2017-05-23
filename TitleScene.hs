@@ -70,9 +70,6 @@ inputAgent sys ctrlIn creditsVar = loop where
 
 animatorAgent :: TVar (Animation Picture) -> IO a
 animatorAgent animVar = hang
-  
-gameplayScene :: System -> Fix IO
-gameplayScene sys = Fix hang
 
 titleAnimation :: Animation Picture
 titleAnimation = pure Blank
